@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{Read, ErrorKind};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -147,11 +147,8 @@ pub fn ping(
         let size = match socket2.read(&mut buffer) {
             Ok(n) => n,
             Err(e) => {
-                if let Some(err_code) = e.raw_os_error() {
-                    if err_code == 11 {
-                        // { code: 11, kind: WouldBlock, message: "Resource temporarily unavailable" }
-                        continue;
-                    }
+                if e.kind() == ErrorKind::WouldBlock {
+                    continue;
                 }
                 error!("Error in read: {:?}", &e);
 
