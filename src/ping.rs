@@ -5,23 +5,31 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use libc::{
+    c_int, c_void, cmsghdr, iovec, msghdr, recvmsg, setsockopt, timeval, SOL_SOCKET, SO_TIMESTAMP,
+    SO_TIMESTAMPING,
+};
+use libc::{ SCM_TIMESTAMPING,
+    SOF_TIMESTAMPING_OPT_CMSG, SOF_TIMESTAMPING_OPT_TSONLY, SOF_TIMESTAMPING_RAW_HARDWARE,
+    SOF_TIMESTAMPING_RX_HARDWARE, SOF_TIMESTAMPING_RX_SOFTWARE, SOF_TIMESTAMPING_SOFTWARE,
+    SOF_TIMESTAMPING_SYS_HARDWARE, SOF_TIMESTAMPING_TX_HARDWARE, SOF_TIMESTAMPING_TX_SOFTWARE,
+};
+use std::mem;
 use std::os::unix::io::AsRawFd;
-use libc::{c_void, c_int, setsockopt, recvmsg, iovec, msghdr, cmsghdr, SOL_SOCKET, SO_TIMESTAMP, timeval};
-
 
 use log::{error, info, warn};
 use rand::Rng;
 use rate_limit::SyncLimiter;
 use ticker::Ticker;
 
-use socket2::{Domain, Protocol, Socket, Type};
 use pnet_packet::icmp::{self, echo_reply, echo_request, IcmpTypes};
 use pnet_packet::ipv4::Ipv4Packet;
 use pnet_packet::Packet;
+use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::stat::{Buckets, Result, TargetResult};
 
-pub struct  PingOption {
+pub struct PingOption {
     pub timeout: Duration,
     pub ttl: u32,
     pub tos: Option<u32>,
@@ -32,10 +40,7 @@ pub struct  PingOption {
     pub count: Option<i64>,
 }
 
-pub fn ping(
-    addrs: Vec<IpAddr>,
-    popt: PingOption,
-) -> anyhow::Result<()> {
+pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
     let pid = popt.ident;
 
     let rand_payload = random_bytes(popt.len);
@@ -51,8 +56,30 @@ pub fn ping(
         let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)).unwrap();
         socket.set_ttl(popt.ttl).unwrap();
         socket.set_write_timeout(Some(popt.timeout)).unwrap();
-        if let Some(tos_value) = popt.tos  {
+        if let Some(tos_value) = popt.tos {
             socket.set_tos(tos_value).unwrap();
+        }
+
+        let enable = SOF_TIMESTAMPING_SOFTWARE
+            | SOF_TIMESTAMPING_TX_SOFTWARE
+            | SOF_TIMESTAMPING_RX_SOFTWARE
+            | SOF_TIMESTAMPING_SYS_HARDWARE
+            | SOF_TIMESTAMPING_TX_HARDWARE
+            | SOF_TIMESTAMPING_RX_HARDWARE
+            | SOF_TIMESTAMPING_RAW_HARDWARE
+            | SOF_TIMESTAMPING_OPT_CMSG
+            | SOF_TIMESTAMPING_OPT_TSONLY;
+        let ret = unsafe {
+            setsockopt(
+                socket.as_raw_fd(),
+                SOL_SOCKET,
+                SO_TIMESTAMPING,
+                &enable as *const _ as *const c_void,
+                mem::size_of_val(&enable) as u32,
+            )
+        };
+        if ret == -1 {
+            warn!("Failed to set SO_TIMESTAMPING");
         }
 
         let zero_payload = vec![0; popt.len];
@@ -144,10 +171,40 @@ pub fn ping(
 
     let socket2 = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))?;
     socket2.set_read_timeout(Some(popt.timeout))?;
-    let enable: c_int = 1;
-    let ret = unsafe { setsockopt(socket2.as_raw_fd(), SOL_SOCKET, SO_TIMESTAMP, &enable as *const _ as *const c_void, std::mem::size_of_val(&enable) as u32) };
+
+    let enable = SOF_TIMESTAMPING_SOFTWARE
+        | SOF_TIMESTAMPING_TX_SOFTWARE
+        | SOF_TIMESTAMPING_RX_SOFTWARE
+        | SOF_TIMESTAMPING_SYS_HARDWARE
+        | SOF_TIMESTAMPING_TX_HARDWARE
+        | SOF_TIMESTAMPING_RX_HARDWARE
+        | SOF_TIMESTAMPING_RAW_HARDWARE
+        | SOF_TIMESTAMPING_OPT_CMSG
+        | SOF_TIMESTAMPING_OPT_TSONLY;
+    let ret = unsafe {
+        setsockopt(
+            socket2.as_raw_fd(),
+            SOL_SOCKET,
+            SO_TIMESTAMPING,
+            &enable as *const _ as *const c_void,
+            mem::size_of_val(&enable) as u32,
+        )
+    };
     if ret == -1 {
-        warn!("Failed to set SO_TIMESTAMP");
+        warn!("Failed to set read SO_TIMESTAMPING");
+        let enable: c_int = 1;
+        let ret = unsafe {
+            setsockopt(
+                socket2.as_raw_fd(),
+                SOL_SOCKET,
+                SO_TIMESTAMP,
+                &enable as *const _ as *const c_void,
+                std::mem::size_of_val(&enable) as u32,
+            )
+        };
+        if ret == -1 {
+            warn!("Failed to set SO_TIMESTAMP");
+        }
     }
 
     let mut buffer: [u8; 2048] = [0; 2048];
@@ -168,7 +225,6 @@ pub fn ping(
         msg_flags: 0,
     };
 
-
     loop {
         // let size = match socket2.read(&mut buffer) {
         //     Ok(n) => n,
@@ -182,7 +238,6 @@ pub fn ping(
         //     }
         // };
         // let buf = &buffer[..size];
-
 
         let nbytes = unsafe { recvmsg(socket2.as_raw_fd(), &mut msghdr, 0) };
         if nbytes == -1 {
@@ -225,7 +280,7 @@ pub fn ping(
                 echo_reply.get_sequence_number()
             );
         }
-        
+
         let payload = echo_reply.payload();
         let ts_bytes = &payload[..16];
         let txts = u128::from_be_bytes(ts_bytes.try_into().unwrap());
@@ -248,12 +303,10 @@ pub fn ping(
                 seq: echo_reply.get_sequence_number(),
                 latency: 0,
                 received: true,
-                bitflip: false
+                bitflip: false,
             },
         );
     }
-
-    
 }
 
 fn random_bytes(len: usize) -> Vec<u8> {
@@ -339,7 +392,9 @@ fn print_stat(buckets: Arc<Mutex<Buckets>>, delay: u64) -> anyhow::Result<()> {
                             total,
                             tr.received,
                             loss_rate * 100.0,
-                            Duration::from_nanos(tr.latency as u64 / (tr.received as u64)).as_secs_f64()*1000.0
+                            Duration::from_nanos(tr.latency as u64 / (tr.received as u64))
+                                .as_secs_f64()
+                                * 1000.0
                         )
                     }
                 }
@@ -357,7 +412,23 @@ fn get_timestamp(msghdr: &mut msghdr) -> Option<SystemTime> {
         if unsafe { (*cmsg).cmsg_level == SOL_SOCKET && (*cmsg).cmsg_type == SO_TIMESTAMP } {
             let tv: *mut timeval = unsafe { libc::CMSG_DATA(cmsg) } as *mut timeval;
             let timestamp = unsafe { *tv };
-            return Some(SystemTime::UNIX_EPOCH + Duration::new(timestamp.tv_sec as u64, timestamp.tv_usec as u32 * 1000));
+            return Some(
+                SystemTime::UNIX_EPOCH
+                    + Duration::new(timestamp.tv_sec as u64, timestamp.tv_usec as u32 * 1000),
+            );
+        }
+        if unsafe { (*cmsg).cmsg_level == SOL_SOCKET && (*cmsg).cmsg_type == SCM_TIMESTAMPING } {
+            let tv: *mut [timeval; 3] = unsafe { libc::CMSG_DATA(cmsg) } as *mut [timeval; 3];
+            let timestamps = unsafe { *tv };
+            for timestamp in &timestamps {
+                if timestamp.tv_sec != 0 || timestamp.tv_usec != 0 {
+                    let seconds = Duration::from_secs(timestamp.tv_sec as u64);
+                    let microseconds = Duration::from_micros(timestamp.tv_usec as u64);
+                    if let Some(duration) = seconds.checked_add(microseconds) {
+                        return Some(SystemTime::UNIX_EPOCH + duration);
+                    }
+                }
+            }
         }
 
         cmsg = unsafe { libc::CMSG_NXTHDR(msghdr, cmsg) };
