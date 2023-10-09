@@ -60,10 +60,20 @@ impl Bucket {
         let mut map = self.value.write().unwrap();
 
         let key = format!("{}-{}", result.target, &result.seq);
-        if let Some(_req) = map.get(&key) {
+        if let Some(req) = map.get(&key) {
+            result.txts = req.txts;
             result.calc_latency();
         }
         map.insert(key, result.clone());
+    }
+
+    pub fn update_txts(&self, target: String, seq: u16, txts: u128) {
+        let mut map = self.value.write().unwrap();
+
+        let key = format!("{}-{}", target, seq);
+        if let Some(result) = map.get_mut(&key) {
+            result.txts = txts;
+        }
     }
 
     pub fn values(&self) -> Vec<Result> {
@@ -111,6 +121,15 @@ impl Buckets {
 
         let bucket = map.get(&key).unwrap();
         bucket.add_reply(result);
+    }
+
+
+    pub fn update_txts(&self,  key: u128, target: String, seq: u16, txts: u128) {
+        let map = self.map.lock().unwrap();
+
+        if let Some(bucket) = map.get(&key) {
+            bucket.update_txts(target, seq, txts);
+        }
     }
 
     pub fn pop(&self) -> Option<Bucket> {

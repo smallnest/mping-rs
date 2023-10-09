@@ -6,8 +6,8 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use libc::{
-    c_int, c_void, cmsghdr, iovec, msghdr, recvmsg, setsockopt, timeval, SOL_SOCKET, SO_TIMESTAMP,
-    SO_TIMESTAMPING,
+    c_int, c_void, cmsghdr, iovec, msghdr, recvmsg, setsockopt, timeval, timespec, SOL_SOCKET, SO_TIMESTAMP,SO_TIMESTAMPING,
+    MSG_ERRQUEUE,MSG_DONTWAIT,
 };
 use libc::{ SCM_TIMESTAMPING,
     SOF_TIMESTAMPING_OPT_CMSG, SOF_TIMESTAMPING_OPT_TSONLY, SOF_TIMESTAMPING_RAW_HARDWARE,
@@ -51,21 +51,24 @@ pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
     let read_buckets = buckets.clone();
     let stat_buckets = buckets.clone();
 
-    // send
-    thread::spawn(move || {
-        let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)).unwrap();
+
+    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)).unwrap();
         socket.set_ttl(popt.ttl).unwrap();
         socket.set_write_timeout(Some(popt.timeout)).unwrap();
         if let Some(tos_value) = popt.tos {
             socket.set_tos(tos_value).unwrap();
         }
+    let socket2 = socket.try_clone().expect("Failed to clone socket");
+
+
+    // send
+    thread::spawn(move || {
+        let mut support_tx_timestamping = true;
 
         let enable = SOF_TIMESTAMPING_SOFTWARE
             | SOF_TIMESTAMPING_TX_SOFTWARE
-            | SOF_TIMESTAMPING_RX_SOFTWARE
             | SOF_TIMESTAMPING_SYS_HARDWARE
             | SOF_TIMESTAMPING_TX_HARDWARE
-            | SOF_TIMESTAMPING_RX_HARDWARE
             | SOF_TIMESTAMPING_RAW_HARDWARE
             | SOF_TIMESTAMPING_OPT_CMSG
             | SOF_TIMESTAMPING_OPT_TSONLY;
@@ -80,6 +83,7 @@ pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
         };
         if ret == -1 {
             warn!("Failed to set SO_TIMESTAMPING");
+            support_tx_timestamping = false;
         }
 
         let zero_payload = vec![0; popt.len];
@@ -91,6 +95,23 @@ pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
         let limiter = SyncLimiter::full(popt.rate, Duration::from_millis(1000));
         let mut seq = 1u16;
         let mut sent_count = 0;
+
+        let mut buf = [0; 2048];
+        let mut control_buf = [0; 1024];
+        let mut iovec = iovec {
+            iov_base: buf.as_mut_ptr() as *mut c_void,
+            iov_len: buf.len(),
+        };
+
+        let mut msghdr = msghdr {
+            msg_name: std::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: &mut iovec,
+            msg_iovlen: 1,
+            msg_control: control_buf.as_mut_ptr() as *mut c_void,
+            msg_controllen: control_buf.len(),
+            msg_flags: 0,
+        };
 
         loop {
             limiter.take();
@@ -120,12 +141,16 @@ pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
 
             for ip in &addrs {
                 let dest = SocketAddr::new(*ip, 0);
+                let key = timestamp / 1_000_000_000;
+                let target = dest.ip().to_string();
+
+                
                 let data = send_buckets.lock().unwrap();
                 data.add(
-                    timestamp / 1_000_000_000,
+                    key,
                     Result {
                         txts: timestamp,
-                        target: dest.ip().to_string(),
+                        target: target.clone(),
                         seq,
                         latency: 0,
                         received: false,
@@ -140,6 +165,18 @@ pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
                     Err(e) => {
                         error!("Error in send: {:?}", e);
                         return;
+                    }
+                }
+
+                if support_tx_timestamping {
+                    unsafe {
+                        let _ = recvmsg(socket.as_raw_fd(), &mut msghdr, MSG_ERRQUEUE|MSG_DONTWAIT);
+                    }
+                    if let Some(txts) = get_timestamp(&mut msghdr) {
+                        let ts = txts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
+                        let data = send_buckets.lock().unwrap();
+                        data.update_txts(key, target, seq, ts);
+                        drop(data);
                     }
                 }
             }
@@ -169,7 +206,6 @@ pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
         &fivea_payload,
     ];
 
-    let socket2 = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))?;
     socket2.set_read_timeout(Some(popt.timeout))?;
 
     let enable = SOF_TIMESTAMPING_SOFTWARE
@@ -226,19 +262,6 @@ pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
     };
 
     loop {
-        // let size = match socket2.read(&mut buffer) {
-        //     Ok(n) => n,
-        //     Err(e) => {
-        //         if e.kind() == ErrorKind::WouldBlock {
-        //             continue;
-        //         }
-        //         error!("Error in read: {:?}", &e);
-
-        //         break;
-        //     }
-        // };
-        // let buf = &buffer[..size];
-
         let nbytes = unsafe { recvmsg(socket2.as_raw_fd(), &mut msghdr, 0) };
         if nbytes == -1 {
             let err = Error::last_os_error();
@@ -272,6 +295,7 @@ pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
             continue;
         }
 
+        let mut bitflip = false;
         if payloads[echo_reply.get_sequence_number() as usize % payloads.len()][16..]
             != echo_reply.payload()[16..]
         {
@@ -279,6 +303,7 @@ pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
                 "bitflip detected! seq={:?},",
                 echo_reply.get_sequence_number()
             );
+            bitflip = true;
         }
 
         let payload = echo_reply.payload();
@@ -303,7 +328,7 @@ pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
                 seq: echo_reply.get_sequence_number(),
                 latency: 0,
                 received: true,
-                bitflip: false,
+                bitflip,
             },
         );
     }
@@ -418,13 +443,14 @@ fn get_timestamp(msghdr: &mut msghdr) -> Option<SystemTime> {
             );
         }
         if unsafe { (*cmsg).cmsg_level == SOL_SOCKET && (*cmsg).cmsg_type == SCM_TIMESTAMPING } {
-            let tv: *mut [timeval; 3] = unsafe { libc::CMSG_DATA(cmsg) } as *mut [timeval; 3];
+            let tv: *mut [timespec; 3] = unsafe { libc::CMSG_DATA(cmsg) } as *mut [timespec; 3];
             let timestamps = unsafe { *tv };
+
             for timestamp in &timestamps {
-                if timestamp.tv_sec != 0 || timestamp.tv_usec != 0 {
+                if timestamp.tv_sec != 0 || timestamp.tv_nsec != 0 {
                     let seconds = Duration::from_secs(timestamp.tv_sec as u64);
-                    let microseconds = Duration::from_micros(timestamp.tv_usec as u64);
-                    if let Some(duration) = seconds.checked_add(microseconds) {
+                    let nanoseconds = Duration::from_nanos(timestamp.tv_nsec as u64);
+                    if let Some(duration) = seconds.checked_add(nanoseconds) {
                         return Some(SystemTime::UNIX_EPOCH + duration);
                     }
                 }

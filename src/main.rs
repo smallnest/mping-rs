@@ -12,7 +12,7 @@ use std::net::{IpAddr, ToSocketAddrs};
 #[derive(Debug, StructOpt)]
 #[structopt(
     name = "mping",
-    version = "0.1.4",
+    version = "0.1.5",
     about = "A multi-targets ping tool, which supports 10,000 packets/second."
 )]
 struct Opt {
