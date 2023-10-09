@@ -1,9 +1,13 @@
 use std::collections::BTreeMap;
-use std::io::{Read, ErrorKind};
+use std::io::{Error, ErrorKind};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use std::os::unix::io::AsRawFd;
+use libc::{c_void, c_int, setsockopt, recvmsg, iovec, msghdr, cmsghdr, SOL_SOCKET, SO_TIMESTAMP, timeval};
+
 
 use log::{error, info, warn};
 use rand::Rng;
@@ -138,24 +142,60 @@ pub fn ping(
         &fivea_payload,
     ];
 
-    let mut socket2 = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))?;
+    let socket2 = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))?;
     socket2.set_read_timeout(Some(popt.timeout))?;
+    let enable: c_int = 1;
+    let ret = unsafe { setsockopt(socket2.as_raw_fd(), SOL_SOCKET, SO_TIMESTAMP, &enable as *const _ as *const c_void, std::mem::size_of_val(&enable) as u32) };
+    if ret == -1 {
+        warn!("Failed to set SO_TIMESTAMP");
+    }
 
     let mut buffer: [u8; 2048] = [0; 2048];
+    let mut control_buf = [0; 1024];
+
+    let mut iovec = iovec {
+        iov_base: buffer.as_mut_ptr() as *mut c_void,
+        iov_len: buffer.len(),
+    };
+
+    let mut msghdr = msghdr {
+        msg_name: std::ptr::null_mut(),
+        msg_namelen: 0,
+        msg_iov: &mut iovec,
+        msg_iovlen: 1,
+        msg_control: control_buf.as_mut_ptr() as *mut c_void,
+        msg_controllen: control_buf.len(),
+        msg_flags: 0,
+    };
+
 
     loop {
-        let size = match socket2.read(&mut buffer) {
-            Ok(n) => n,
-            Err(e) => {
-                if e.kind() == ErrorKind::WouldBlock {
-                    continue;
-                }
-                error!("Error in read: {:?}", &e);
+        // let size = match socket2.read(&mut buffer) {
+        //     Ok(n) => n,
+        //     Err(e) => {
+        //         if e.kind() == ErrorKind::WouldBlock {
+        //             continue;
+        //         }
+        //         error!("Error in read: {:?}", &e);
 
-                break;
+        //         break;
+        //     }
+        // };
+        // let buf = &buffer[..size];
+
+
+        let nbytes = unsafe { recvmsg(socket2.as_raw_fd(), &mut msghdr, 0) };
+        if nbytes == -1 {
+            let err = Error::last_os_error();
+            if err.kind() == ErrorKind::WouldBlock {
+                continue;
             }
-        };
-        let buf = &buffer[..size];
+
+            error!("Failed torr receive message");
+            return Err(Error::new(ErrorKind::Other, "Failed to receive message").into());
+        }
+
+        let buf = &buffer[..nbytes as usize];
 
         let ipv4_packet = Ipv4Packet::new(buf).unwrap();
         let icmp_packet = pnet_packet::icmp::IcmpPacket::new(ipv4_packet.payload()).unwrap();
@@ -185,7 +225,7 @@ pub fn ping(
                 echo_reply.get_sequence_number()
             );
         }
-
+        
         let payload = echo_reply.payload();
         let ts_bytes = &payload[..16];
         let txts = u128::from_be_bytes(ts_bytes.try_into().unwrap());
@@ -193,7 +233,10 @@ pub fn ping(
 
         let now = SystemTime::now();
         let since_the_epoch = now.duration_since(UNIX_EPOCH).unwrap();
-        let timestamp = since_the_epoch.as_nanos();
+        let mut timestamp = since_the_epoch.as_nanos();
+        if let Some(rxts) = get_timestamp(&mut msghdr) {
+            timestamp = rxts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        }
 
         let buckets = read_buckets.lock().unwrap();
         buckets.add_reply(
@@ -210,7 +253,7 @@ pub fn ping(
         );
     }
 
-    Ok(())
+    
 }
 
 fn random_bytes(len: usize) -> Vec<u8> {
@@ -305,4 +348,20 @@ fn print_stat(buckets: Arc<Mutex<Buckets>>, delay: u64) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn get_timestamp(msghdr: &mut msghdr) -> Option<SystemTime> {
+    let mut cmsg: *mut cmsghdr = unsafe { libc::CMSG_FIRSTHDR(msghdr) };
+
+    while !cmsg.is_null() {
+        if unsafe { (*cmsg).cmsg_level == SOL_SOCKET && (*cmsg).cmsg_type == SO_TIMESTAMP } {
+            let tv: *mut timeval = unsafe { libc::CMSG_DATA(cmsg) } as *mut timeval;
+            let timestamp = unsafe { *tv };
+            return Some(SystemTime::UNIX_EPOCH + Duration::new(timestamp.tv_sec as u64, timestamp.tv_usec as u32 * 1000));
+        }
+
+        cmsg = unsafe { libc::CMSG_NXTHDR(msghdr, cmsg) };
+    }
+
+    None
 }
