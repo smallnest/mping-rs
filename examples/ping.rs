@@ -25,6 +25,7 @@ fn main() {
         ident: pid,
         len: 56,
         rate: 100,
+        rate_for_all: false,
         delay: 3,
         count: None,
     };

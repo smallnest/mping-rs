@@ -35,7 +35,7 @@ use crate::stat::{Buckets, Result, TargetResult};
 /// ``` rust
 /// use std::time::Duration;
 /// use mping::PingOption;
-/// 
+///
 /// let popt = PingOption {
 ///    timeout: Duration::from_secs(1),
 ///    ttl: 64,
@@ -43,6 +43,7 @@ use crate::stat::{Buckets, Result, TargetResult};
 ///    ident: 1234,
 ///    len: 56,
 ///    rate: 100,
+///    rate_for_all: false,
 ///    delay: 3,
 ///    count: None,
 /// };
@@ -60,6 +61,10 @@ pub struct PingOption {
     pub len: usize,
     /// Ping rate for each target.
     pub rate: u64,
+    /// Rate for all targets or single target.
+    /// if true, each target will send packets with rate for all targets.
+    /// if false, each target will send packets with their own rate.
+    pub rate_for_all: bool,
     /// Delay for output ping results.
     pub delay: u64,
     /// Max ping count for each target. Not check in case of None.
@@ -67,13 +72,13 @@ pub struct PingOption {
 }
 
 /// Ping function.
-/// 
+///
 /// # Arguments
-/// 
+///
 /// - `addrs` is a vector of ip address.
 /// - `popt` is a PingOption struct.
 /// - `enable_print_stat` is a bool value to enable print ping stat in log.
-/// - `tx`` is a Sender for send ping result. If tx is None, ping will not send result. 
+/// - `tx`` is a Sender for send ping result. If tx is None, ping will not send result.
 ///   You can use mpsc::Receiver to receive ping results.
 pub fn ping(
     addrs: Vec<IpAddr>,
@@ -98,6 +103,8 @@ pub fn ping(
         socket.set_tos(tos_value).unwrap();
     }
     let socket2 = socket.try_clone().expect("Failed to clone socket");
+
+    let has_tx = tx.is_some();
 
     // send
     thread::spawn(move || {
@@ -152,32 +159,37 @@ pub fn ping(
         };
 
         loop {
-            limiter.take();
+            if !popt.rate_for_all {
+                limiter.take();
+            }
 
             let payload = payloads[seq as usize % payloads.len()];
-
-            let mut buf = vec![0; 8 + payload.len()]; // 8 bytes of header, then payload
-            let mut packet = echo_request::MutableEchoRequestPacket::new(&mut buf[..]).unwrap();
-            packet.set_icmp_type(icmp::IcmpTypes::EchoRequest);
-            packet.set_identifier(pid);
-            packet.set_sequence_number(seq);
-
-            let now = SystemTime::now();
-            let since_the_epoch = now.duration_since(UNIX_EPOCH).unwrap();
-            let timestamp = since_the_epoch.as_nanos();
-
-            let ts_bytes = timestamp.to_be_bytes();
-            let mut send_payload = vec![0; payload.len()];
-            send_payload[..16].copy_from_slice(&ts_bytes[..16]);
-            send_payload[16..].copy_from_slice(&payload[16..]);
-
-            packet.set_payload(&send_payload);
-
-            let icmp_packet = icmp::IcmpPacket::new(packet.packet()).unwrap();
-            let checksum = icmp::checksum(&icmp_packet);
-            packet.set_checksum(checksum);
-
             for ip in &addrs {
+                if popt.rate_for_all {
+                    limiter.take();
+                }
+
+                let mut buf = vec![0; 8 + payload.len()]; // 8 bytes of header, then payload
+                let mut packet = echo_request::MutableEchoRequestPacket::new(&mut buf[..]).unwrap();
+                packet.set_icmp_type(icmp::IcmpTypes::EchoRequest);
+                packet.set_identifier(pid);
+                packet.set_sequence_number(seq);
+
+                let now = SystemTime::now();
+                let since_the_epoch = now.duration_since(UNIX_EPOCH).unwrap();
+                let timestamp = since_the_epoch.as_nanos();
+
+                let ts_bytes = timestamp.to_be_bytes();
+                let mut send_payload = vec![0; payload.len()];
+                send_payload[..16].copy_from_slice(&ts_bytes[..16]);
+                send_payload[16..].copy_from_slice(&payload[16..]);
+
+                packet.set_payload(&send_payload);
+
+                let icmp_packet = icmp::IcmpPacket::new(packet.packet()).unwrap();
+                let checksum = icmp::checksum(&icmp_packet);
+                packet.set_checksum(checksum);
+
                 let dest = SocketAddr::new(*ip, 0);
                 let key = timestamp / 1_000_000_000;
                 let target = dest.ip().to_string();
@@ -225,12 +237,15 @@ pub fn ping(
             if popt.count.is_some() && sent_count >= popt.count.unwrap() {
                 thread::sleep(Duration::from_secs(popt.delay));
                 info!("reached {} and exit", sent_count);
+                if has_tx {
+                    return;
+                }
                 std::process::exit(0);
             }
         }
     });
 
-    thread::spawn(move || print_stat(stat_buckets, popt.delay, enable_print_stat, tx));
+    thread::spawn(move || print_stat(stat_buckets, popt.delay, enable_print_stat, tx.clone()));
 
     // read
     let zero_payload = vec![0; popt.len];
