@@ -5,8 +5,11 @@ use std::{
     sync::{Mutex, RwLock},
 };
 
+/// Bucket is used to store the ping results of one second for all targets.
 pub struct Bucket {
+    // key is the timestamp of the bucket in seconds.
     pub key: u128,
+    // value is the ping results of all targets in the bucket.
     pub value: RwLock<HashMap<String, Result>>,
 }
 
@@ -43,6 +46,7 @@ impl PartialEq for Bucket {
 }
 
 impl Bucket {
+    /// Create a new bucket.
     pub fn new(key: u128) -> Self {
         Bucket {
             key,
@@ -50,12 +54,14 @@ impl Bucket {
         }
     }
 
+    /// Add a ping result to the bucket.
     pub fn add(&self, result: Result) {
         let mut map = self.value.write().unwrap();
         let key = format!("{}-{}", &result.target, &result.seq);
         map.insert(key, result);
     }
 
+    /// Add a ping reply to the bucket.
     pub fn add_reply(&self, mut result: Result) {
         let mut map = self.value.write().unwrap();
 
@@ -67,6 +73,7 @@ impl Bucket {
         map.insert(key, result.clone());
     }
 
+    /// Update the txts (software/hardware timestamp) of the ping result after send.
     pub fn update_txts(&self, target: String, seq: u16, txts: u128) {
         let mut map = self.value.write().unwrap();
 
@@ -76,19 +83,24 @@ impl Bucket {
         }
     }
 
+    /// Get the ping result of all targets.
     pub fn values(&self) -> Vec<Result> {
         let map = self.value.read().unwrap();
         map.values().cloned().collect()
     }
 }
 
+/// Buckets is used to store all unprocessed buckets.
 #[derive(Default)]
 pub struct Buckets {
+    // buckets is a priority queue, the top of the queue is the bucket with the smallest key.
     pub buckets: Mutex<BinaryHeap<Bucket>>,
+    // map is used to quickly find the bucket by key.
     pub map: Mutex<HashMap<u128, Bucket>>,
 }
 
 impl Buckets {
+    /// Create a new buckets.
     pub fn new() -> Buckets {
         Buckets {
             buckets: Mutex::new(BinaryHeap::new()),
@@ -96,6 +108,7 @@ impl Buckets {
         }
     }
 
+    /// Add a ping result to the buckets. The key is the timestamp of the bucket in seconds.
     pub fn add(&self, key: u128, value: Result) {
         let mut map = self.map.lock().unwrap();
         map.entry(key).or_insert_with(|| {
@@ -111,6 +124,7 @@ impl Buckets {
         bucket.add(value);
     }
 
+    /// Add a ping reply to the buckets. The key is the timestamp of the bucket in seconds.
     pub fn add_reply(&self, key: u128, result: Result) {
         let mut map = self.map.lock().unwrap();
 
@@ -123,8 +137,9 @@ impl Buckets {
         bucket.add_reply(result);
     }
 
-
-    pub fn update_txts(&self,  key: u128, target: String, seq: u16, txts: u128) {
+    /// Update the txts (software/hardware timestamp) of the ping result after send.
+    /// The key is the timestamp of the bucket in seconds.
+    pub fn update_txts(&self, key: u128, target: String, seq: u16, txts: u128) {
         let map = self.map.lock().unwrap();
 
         if let Some(bucket) = map.get(&key) {
@@ -132,6 +147,7 @@ impl Buckets {
         }
     }
 
+    /// pop the bucket with the smallest key.
     pub fn pop(&self) -> Option<Bucket> {
         let mut buckets = self.buckets.lock().unwrap();
         let bucket = buckets.pop()?;
@@ -139,29 +155,35 @@ impl Buckets {
         Some(bucket)
     }
 
+    /// Get(but not pop) the bucket with the smallest key.
     pub fn last(&self) -> Option<Bucket> {
         let buckets = self.buckets.lock().unwrap();
         buckets.peek().cloned()
     }
 }
 
+/// Result is used to store one ping result of one target.
+/// The result is indentified by the target and the sequence number.
 #[derive(Default, Clone, Debug)]
 pub struct Result {
+    /// The timestamp when the ping request is sent.
     pub txts: u128,
+    /// The timestamp when the ping reply is received.
     pub rxts: u128,
+    /// The sequence number of the ping request.
     pub seq: u16,
+    /// The target of the ping result.
     pub target: String,
+    /// The latency of the ping result.
     pub latency: u128,
+    /// Received is true if the ping reply is received.
     pub received: bool,
+    /// Bitflip is true if the ping reply is received but the data is corrupted.
     pub bitflip: bool,
 }
 
 impl Result {
-    // 计算latency
-    pub fn calc_latency(&mut self) {
-        self.latency = self.rxts - self.txts;
-    }
-
+    /// Create a new ping result.
     pub fn new(txts: u128, target: &str, seq: u16) -> Self {
         Result {
             txts,
@@ -170,12 +192,26 @@ impl Result {
             ..Default::default()
         }
     }
+
+    /// Calculate the latency of the ping result.
+    pub fn calc_latency(&mut self) {
+        self.latency = self.rxts - self.txts;
+    }
 }
 
+/// TargetResult is used to store the ping stat result of one target.
 #[derive(Default, Clone, Debug)]
 pub struct TargetResult {
+    /// The target of the ping result.
+    pub target: String,
+    /// The loss rate of the ping result.
+    pub loss_rate: f64,
+    /// The average latency of the ping result.
     pub latency: u128,
+    /// Theloss count of the ping result.
     pub loss: u32,
+    /// The received count of the ping result.
     pub received: u32,
+    /// The bitflip count of the ping result.
     pub bitflip_count: u32,
 }

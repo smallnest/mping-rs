@@ -8,6 +8,9 @@ a multi-targets ping tool, which supports 10,000 packets/second, accurate latenc
 > 正常的ping一般用来做探测工具，mping还可以用来做压测工具。
 > Go版本: [smallnest/mping](https://github.com/smallnest/mping)
 
+
+And you can use it as a lib to implement your multi-targets and handle the ping results. See the `ping.rs` example in the examples folder.
+
 ## Usage
 
 compile
@@ -20,7 +23,7 @@ options usage.
 
 ```sh
 > $$ mping  -h
-mping 0.1.5
+mping 0.2.0
 A multi-targets ping tool, which supports 10,000 packets/second.
 
 USAGE:

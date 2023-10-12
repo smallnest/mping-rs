@@ -1,18 +1,20 @@
 use std::collections::BTreeMap;
 use std::io::{Error, ErrorKind};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use libc::{
-    c_int, c_void, cmsghdr, iovec, msghdr, recvmsg, setsockopt, timeval, timespec, SOL_SOCKET, SO_TIMESTAMP,SO_TIMESTAMPING,
-    MSG_ERRQUEUE,MSG_DONTWAIT,
+    c_int, c_void, cmsghdr, iovec, msghdr, recvmsg, setsockopt, timespec, timeval, MSG_DONTWAIT,
+    MSG_ERRQUEUE, SOL_SOCKET, SO_TIMESTAMP, SO_TIMESTAMPING,
 };
-use libc::{ SCM_TIMESTAMPING,
-    SOF_TIMESTAMPING_OPT_CMSG, SOF_TIMESTAMPING_OPT_TSONLY, SOF_TIMESTAMPING_RAW_HARDWARE,
-    SOF_TIMESTAMPING_RX_HARDWARE, SOF_TIMESTAMPING_RX_SOFTWARE, SOF_TIMESTAMPING_SOFTWARE,
-    SOF_TIMESTAMPING_SYS_HARDWARE, SOF_TIMESTAMPING_TX_HARDWARE, SOF_TIMESTAMPING_TX_SOFTWARE,
+use libc::{
+    SCM_TIMESTAMPING, SOF_TIMESTAMPING_OPT_CMSG, SOF_TIMESTAMPING_OPT_TSONLY,
+    SOF_TIMESTAMPING_RAW_HARDWARE, SOF_TIMESTAMPING_RX_HARDWARE, SOF_TIMESTAMPING_RX_SOFTWARE,
+    SOF_TIMESTAMPING_SOFTWARE, SOF_TIMESTAMPING_SYS_HARDWARE, SOF_TIMESTAMPING_TX_HARDWARE,
+    SOF_TIMESTAMPING_TX_SOFTWARE,
 };
 use std::mem;
 use std::os::unix::io::AsRawFd;
@@ -29,18 +31,56 @@ use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::stat::{Buckets, Result, TargetResult};
 
+/// Ping option struct for ping function.
+/// ``` rust
+/// use std::time::Duration;
+/// use mping::PingOption;
+/// 
+/// let popt = PingOption {
+///    timeout: Duration::from_secs(1),
+///    ttl: 64,
+///    tos: None,
+///    ident: 1234,
+///    len: 56,
+///    rate: 100,
+///    delay: 3,
+///    count: None,
+/// };
+/// ```
 pub struct PingOption {
+    /// Timeout for each ping write and read.
     pub timeout: Duration,
+    /// TTL for each ping packet.
     pub ttl: u32,
+    /// TOS for each ping packet.
     pub tos: Option<u32>,
+    /// Id for each ICMP packet.
     pub ident: u16,
+    /// Payload length for each ICMP packet.
     pub len: usize,
+    /// Ping rate for each target.
     pub rate: u64,
+    /// Delay for output ping results.
     pub delay: u64,
+    /// Max ping count for each target. Not check in case of None.
     pub count: Option<i64>,
 }
 
-pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
+/// Ping function.
+/// 
+/// # Arguments
+/// 
+/// - `addrs` is a vector of ip address.
+/// - `popt` is a PingOption struct.
+/// - `enable_print_stat` is a bool value to enable print ping stat in log.
+/// - `tx`` is a Sender for send ping result. If tx is None, ping will not send result. 
+///   You can use mpsc::Receiver to receive ping results.
+pub fn ping(
+    addrs: Vec<IpAddr>,
+    popt: PingOption,
+    enable_print_stat: bool,
+    tx: Option<Sender<TargetResult>>,
+) -> anyhow::Result<()> {
     let pid = popt.ident;
 
     let rand_payload = random_bytes(popt.len);
@@ -51,15 +91,13 @@ pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
     let read_buckets = buckets.clone();
     let stat_buckets = buckets.clone();
 
-
     let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)).unwrap();
-        socket.set_ttl(popt.ttl).unwrap();
-        socket.set_write_timeout(Some(popt.timeout)).unwrap();
-        if let Some(tos_value) = popt.tos {
-            socket.set_tos(tos_value).unwrap();
-        }
+    socket.set_ttl(popt.ttl).unwrap();
+    socket.set_write_timeout(Some(popt.timeout)).unwrap();
+    if let Some(tos_value) = popt.tos {
+        socket.set_tos(tos_value).unwrap();
+    }
     let socket2 = socket.try_clone().expect("Failed to clone socket");
-
 
     // send
     thread::spawn(move || {
@@ -144,7 +182,6 @@ pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
                 let key = timestamp / 1_000_000_000;
                 let target = dest.ip().to_string();
 
-                
                 let data = send_buckets.lock().unwrap();
                 data.add(
                     key,
@@ -170,7 +207,8 @@ pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
 
                 if support_tx_timestamping {
                     unsafe {
-                        let _ = recvmsg(socket.as_raw_fd(), &mut msghdr, MSG_ERRQUEUE|MSG_DONTWAIT);
+                        let _ =
+                            recvmsg(socket.as_raw_fd(), &mut msghdr, MSG_ERRQUEUE | MSG_DONTWAIT);
                     }
                     if let Some(txts) = get_timestamp(&mut msghdr) {
                         let ts = txts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -192,7 +230,7 @@ pub fn ping(addrs: Vec<IpAddr>, popt: PingOption) -> anyhow::Result<()> {
         }
     });
 
-    thread::spawn(move || print_stat(stat_buckets, popt.delay));
+    thread::spawn(move || print_stat(stat_buckets, popt.delay, enable_print_stat, tx));
 
     // read
     let zero_payload = vec![0; popt.len];
@@ -342,9 +380,16 @@ fn random_bytes(len: usize) -> Vec<u8> {
     vec
 }
 
-fn print_stat(buckets: Arc<Mutex<Buckets>>, delay: u64) -> anyhow::Result<()> {
+fn print_stat(
+    buckets: Arc<Mutex<Buckets>>,
+    delay: u64,
+    enable_print_stat: bool,
+    tx: Option<Sender<TargetResult>>,
+) -> anyhow::Result<()> {
     let delay = Duration::from_secs(delay).as_nanos(); // 5s
     let mut last_key = 0;
+
+    let has_sender = tx.is_some();
 
     let ticker = Ticker::new(0.., Duration::from_secs(1));
     for _ in ticker {
@@ -374,8 +419,7 @@ fn print_stat(buckets: Arc<Mutex<Buckets>>, delay: u64) -> anyhow::Result<()> {
 
                 last_key = pop.key;
 
-                // 统计和打印逻辑
-                // 统计
+                // cacl stat
                 let mut target_results = BTreeMap::new();
 
                 for r in pop.values() {
@@ -390,9 +434,13 @@ fn print_stat(buckets: Arc<Mutex<Buckets>>, delay: u64) -> anyhow::Result<()> {
                     } else {
                         target_result.loss += 1;
                     }
+
+                    if r.bitflip {
+                        target_result.bitflip_count += 1;
+                    }
                 }
 
-                // 打印
+                // output
                 for (target, tr) in &target_results {
                     let total = tr.received + tr.loss;
                     let loss_rate = if total == 0 {
@@ -401,26 +449,35 @@ fn print_stat(buckets: Arc<Mutex<Buckets>>, delay: u64) -> anyhow::Result<()> {
                         (tr.loss as f64) / (total as f64)
                     };
 
-                    if tr.received == 0 {
-                        info!(
-                            "{}: sent:{}, recv:{}, loss rate: {:.2}%, latency: {}ms",
-                            target,
-                            total,
-                            tr.received,
-                            loss_rate * 100.0,
-                            0
-                        )
-                    } else {
-                        info!(
-                            "{}: sent:{}, recv:{},  loss rate: {:.2}%, latency: {:.2}ms",
-                            target,
-                            total,
-                            tr.received,
-                            loss_rate * 100.0,
-                            Duration::from_nanos(tr.latency as u64 / (tr.received as u64))
-                                .as_secs_f64()
-                                * 1000.0
-                        )
+                    if enable_print_stat {
+                        if tr.received == 0 {
+                            info!(
+                                "{}: sent:{}, recv:{}, loss rate: {:.2}%, latency: {}ms",
+                                target,
+                                total,
+                                tr.received,
+                                loss_rate * 100.0,
+                                0
+                            )
+                        } else {
+                            info!(
+                                "{}: sent:{}, recv:{},  loss rate: {:.2}%, latency: {:.2}ms",
+                                target,
+                                total,
+                                tr.received,
+                                loss_rate * 100.0,
+                                Duration::from_nanos(tr.latency as u64 / (tr.received as u64))
+                                    .as_secs_f64()
+                                    * 1000.0
+                            )
+                        }
+                    }
+
+                    if has_sender {
+                        let mut tr = tr.clone();
+                        tr.target = target.clone();
+                        tr.loss_rate = loss_rate;
+                        let _ = tx.as_ref().unwrap().send(tr);
                     }
                 }
             }
@@ -461,4 +518,50 @@ fn get_timestamp(msghdr: &mut msghdr) -> Option<SystemTime> {
     }
 
     None
+}
+
+// must run `cargo test` with root privilege
+#[cfg(test)]
+mod tests {
+    //     use std::net::IpAddr;
+    //     use std::process;
+    //     use std::sync::mpsc;
+
+    //     use super::*;
+
+    //     #[test]
+    //     fn test_ping() -> anyhow::Result<()> {
+    //         let pid = process::id() as u16;
+
+    //         let addrs = vec![IpAddr::from([127, 0, 0, 1])];
+    //         let popt = PingOption {
+    //             timeout: Duration::from_secs(1),
+    //             ttl: 64,
+    //             tos: None,
+    //             ident: pid,
+    //             len: 56,
+    //             rate: 0,
+    //             delay: 0,
+    //             count: None,
+    //         };
+    //         let (tx, rx) = mpsc::channel();
+
+    //         thread::spawn(move || {
+    //             match ping(addrs, popt, Some(tx)) {
+    //                 Ok(_) => {}
+    //                 Err(e) => {
+    //                     println!("error: {:?}", e);
+    //                 }
+    //             }
+    //         });
+
+    //         for _i in 1..10 {
+    //             let result = rx.recv_timeout(Duration::from_secs(2))?;
+    //             assert_eq!(result.target, "127.0.0.1");
+    //             assert_eq!(result.received, 1);
+    //             assert_eq!(result.loss, 0);
+    //         }
+
+    //         Ok(())
+    //     }
 }
