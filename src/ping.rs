@@ -108,6 +108,8 @@ pub fn ping(
 
     // send
     thread::spawn(move || {
+        let raw_fd = socket.as_raw_fd();
+
         let mut support_tx_timestamping = true;
 
         let enable = SOF_TIMESTAMPING_SOFTWARE
@@ -119,7 +121,7 @@ pub fn ping(
             | SOF_TIMESTAMPING_OPT_TSONLY;
         let ret = unsafe {
             setsockopt(
-                socket.as_raw_fd(),
+                raw_fd,
                 SOL_SOCKET,
                 SO_TIMESTAMPING,
                 &enable as *const _ as *const c_void,
@@ -219,8 +221,7 @@ pub fn ping(
 
                 if support_tx_timestamping {
                     unsafe {
-                        let _ =
-                            recvmsg(socket.as_raw_fd(), &mut msghdr, MSG_ERRQUEUE | MSG_DONTWAIT);
+                        let _ = recvmsg(raw_fd, &mut msghdr, MSG_ERRQUEUE | MSG_DONTWAIT);
                     }
                     if let Some(txts) = get_timestamp(&mut msghdr) {
                         let ts = txts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -260,6 +261,7 @@ pub fn ping(
     ];
 
     socket2.set_read_timeout(Some(popt.timeout))?;
+    let raw_fd = socket2.as_raw_fd();
 
     let enable = SOF_TIMESTAMPING_SOFTWARE
         | SOF_TIMESTAMPING_TX_SOFTWARE
@@ -272,7 +274,7 @@ pub fn ping(
         | SOF_TIMESTAMPING_OPT_TSONLY;
     let ret = unsafe {
         setsockopt(
-            socket2.as_raw_fd(),
+            raw_fd,
             SOL_SOCKET,
             SO_TIMESTAMPING,
             &enable as *const _ as *const c_void,
@@ -284,7 +286,7 @@ pub fn ping(
         let enable: c_int = 1;
         let ret = unsafe {
             setsockopt(
-                socket2.as_raw_fd(),
+                raw_fd,
                 SOL_SOCKET,
                 SO_TIMESTAMP,
                 &enable as *const _ as *const c_void,
@@ -315,7 +317,7 @@ pub fn ping(
     };
 
     loop {
-        let nbytes = unsafe { recvmsg(socket2.as_raw_fd(), &mut msghdr, 0) };
+        let nbytes = unsafe { recvmsg(raw_fd, &mut msghdr, 0) };
         if nbytes == -1 {
             let err = Error::last_os_error();
             if err.kind() == ErrorKind::WouldBlock {
@@ -535,48 +537,194 @@ fn get_timestamp(msghdr: &mut msghdr) -> Option<SystemTime> {
     None
 }
 
-// must run `cargo test` with root privilege
-#[cfg(test)]
-mod tests {
-    //     use std::net::IpAddr;
-    //     use std::process;
-    //     use std::sync::mpsc;
+/// ping the target once and return bitflip or not and latency.
+pub fn ping_once(
+    addr: String,
+    timeout: Option<Duration>,
+    seq: Option<u16>,
+    ttl: Option<u32>,
+    tos: Option<u32>,
+    len: Option<usize>,
+) -> anyhow::Result<(bool, Duration)> {
+    let mut rng = rand::thread_rng();
 
-    //     use super::*;
+    // prepare pamaters
+    let ip = addr.parse::<IpAddr>()?;
+    let target = SocketAddr::new(ip, 0);
+    let pid = std::process::id() as u16;
+    let timeout = timeout.unwrap_or(Duration::from_secs(1));
+    let seq = seq.unwrap_or(rng.gen());
+    let ttl = ttl.unwrap_or(64);
+    let len = len.unwrap_or(64);
 
-    //     #[test]
-    //     fn test_ping() -> anyhow::Result<()> {
-    //         let pid = process::id() as u16;
+    // prepare payloads
+    let rand_payload = random_bytes(len);
+    let zero_payload = vec![0; len];
+    let one_payload = vec![1; len];
+    let fivea_payload = vec![0x5A; len];
+    let payloads: [&[u8]; 4] = [&rand_payload, &zero_payload, &one_payload, &fivea_payload];
 
-    //         let addrs = vec![IpAddr::from([127, 0, 0, 1])];
-    //         let popt = PingOption {
-    //             timeout: Duration::from_secs(1),
-    //             ttl: 64,
-    //             tos: None,
-    //             ident: pid,
-    //             len: 56,
-    //             rate: 0,
-    //             delay: 0,
-    //             count: None,
-    //         };
-    //         let (tx, rx) = mpsc::channel();
+    // set socket
+    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))?;
+    socket.set_ttl(ttl)?;
+    socket.set_write_timeout(Some(timeout))?;
+    socket.set_read_timeout(Some(timeout))?;
+    if let Some(tos_value) = tos {
+        socket.set_tos(tos_value).unwrap();
+    }
+    let raw_fd = socket.as_raw_fd();
 
-    //         thread::spawn(move || {
-    //             match ping(addrs, popt, Some(tx)) {
-    //                 Ok(_) => {}
-    //                 Err(e) => {
-    //                     println!("error: {:?}", e);
-    //                 }
-    //             }
-    //         });
+    // timestamp
+    let mut support_tx_timestamping = true;
+    let enable = SOF_TIMESTAMPING_SOFTWARE
+        | SOF_TIMESTAMPING_TX_SOFTWARE
+        | SOF_TIMESTAMPING_SYS_HARDWARE
+        | SOF_TIMESTAMPING_TX_HARDWARE
+        | SOF_TIMESTAMPING_RAW_HARDWARE
+        | SOF_TIMESTAMPING_OPT_CMSG
+        | SOF_TIMESTAMPING_OPT_TSONLY;
+    let ret = unsafe {
+        setsockopt(
+            raw_fd,
+            SOL_SOCKET,
+            SO_TIMESTAMPING,
+            &enable as *const _ as *const c_void,
+            mem::size_of_val(&enable) as u32,
+        )
+    };
+    if ret == -1 {
+        warn!("Failed to set SO_TIMESTAMPING");
+        support_tx_timestamping = false;
+    }
 
-    //         for _i in 1..10 {
-    //             let result = rx.recv_timeout(Duration::from_secs(2))?;
-    //             assert_eq!(result.target, "127.0.0.1");
-    //             assert_eq!(result.received, 1);
-    //             assert_eq!(result.loss, 0);
-    //         }
 
-    //         Ok(())
-    //     }
+    // msghdr
+    let mut buf = [0; 2048];
+    let mut control_buf = [0; 1024];
+    let mut iovec = iovec {
+        iov_base: buf.as_mut_ptr() as *mut c_void,
+        iov_len: buf.len(),
+    };
+
+    let mut msghdr = msghdr {
+        msg_name: std::ptr::null_mut(),
+        msg_namelen: 0,
+        msg_iov: &mut iovec,
+        msg_iovlen: 1,
+        msg_control: control_buf.as_mut_ptr() as *mut c_void,
+        msg_controllen: control_buf.len(),
+        msg_flags: 0,
+    };
+
+
+    // prepare packet
+    let payload = payloads[seq as usize % payloads.len()];
+    let mut buf = vec![0; 8 + payload.len()]; // 8 bytes of header, then payload
+    let mut packet = echo_request::MutableEchoRequestPacket::new(&mut buf[..]).unwrap();
+    packet.set_icmp_type(icmp::IcmpTypes::EchoRequest);
+    packet.set_identifier(pid);
+    packet.set_sequence_number(seq);
+    packet.set_payload(payload);
+
+    let icmp_packet = icmp::IcmpPacket::new(packet.packet()).unwrap();
+    let checksum = icmp::checksum(&icmp_packet);
+    packet.set_checksum(checksum);
+    
+    // send the packet
+    let now = SystemTime::now();
+    let since_the_epoch = now.duration_since(UNIX_EPOCH)?;
+    let mut txts = since_the_epoch.as_nanos();
+    socket.send_to(&buf, &target.into())?;
+
+    // read tx timestamp
+    if support_tx_timestamping {
+        unsafe {
+            let _ = recvmsg(raw_fd, &mut msghdr, MSG_ERRQUEUE | MSG_DONTWAIT);
+        }
+        if let Some(ts) = get_timestamp(&mut msghdr) {
+            txts = ts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        }
+    }
+
+    // read
+    let mut buffer: [u8; 2048] = [0; 2048];
+    let mut control_buf = [0; 1024];
+
+    let mut iovec = iovec {
+        iov_base: buffer.as_mut_ptr() as *mut c_void,
+        iov_len: buffer.len(),
+    };
+
+    let mut msghdr = msghdr {
+        msg_name: std::ptr::null_mut(),
+        msg_namelen: 0,
+        msg_iov: &mut iovec,
+        msg_iovlen: 1,
+        msg_control: control_buf.as_mut_ptr() as *mut c_void,
+        msg_controllen: control_buf.len(),
+        msg_flags: 0,
+    };
+
+    let mut n = timeout.as_secs() + 1;
+    if n < 2 {
+        n = 2;
+    }
+    for _ in 1..n {
+        let nbytes = unsafe { recvmsg(raw_fd, &mut msghdr, 0) };
+        if nbytes == -1 {
+            let err = Error::last_os_error();
+            if err.kind() == ErrorKind::WouldBlock {
+                continue;
+            }
+
+            error!("Failed to receive message");
+            return Err(Error::new(ErrorKind::TimedOut, "timeout").into());
+        }
+
+        let buf = &buffer[..nbytes as usize];
+
+        let ipv4_packet = Ipv4Packet::new(buf).unwrap();
+        let icmp_packet = pnet_packet::icmp::IcmpPacket::new(ipv4_packet.payload()).unwrap();
+
+        if icmp_packet.get_icmp_type() != IcmpTypes::EchoReply
+            || icmp_packet.get_icmp_code() != echo_reply::IcmpCodes::NoCode
+        {
+            continue;
+        }
+
+        let echo_reply = match icmp::echo_reply::EchoReplyPacket::new(icmp_packet.packet()) {
+            Some(echo_reply) => echo_reply,
+            None => {
+                continue;
+            }
+        };
+
+        if echo_reply.get_identifier() != pid {
+            continue;
+        }
+
+        let mut bitflip = false;
+        if payloads[echo_reply.get_sequence_number() as usize % payloads.len()] != echo_reply.payload()
+        {
+            warn!(
+                "bitflip detected! seq={:?},",
+                echo_reply.get_sequence_number()
+            );
+            bitflip = true;
+        }
+        let dest_ip = ipv4_packet.get_source();
+        if dest_ip != ip {
+            continue;
+        }
+
+        let since_the_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let mut rxts = since_the_epoch.as_nanos();
+        if let Some(ts) = get_timestamp(&mut msghdr) {
+            rxts = ts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        }
+
+        return Ok((bitflip, Duration::from_nanos((rxts - txts) as u64)))
+    }
+
+    Err(Error::new(ErrorKind::TimedOut, "timeout").into())
 }

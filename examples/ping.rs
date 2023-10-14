@@ -3,6 +3,7 @@ use std::process;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+use std::net::{IpAddr, ToSocketAddrs};
 
 use ::mping::{ping, PingOption};
 
@@ -16,8 +17,9 @@ fn main() {
 
     let pid = process::id() as u16;
     let target = args[1].clone();
+    let addr = parse_ip(&target);
 
-    let addrs = vec![target.parse().unwrap()];
+    let addrs = vec![addr.parse().unwrap()];
     let popt = PingOption {
         timeout: Duration::from_secs(1),
         ttl: 64,
@@ -49,7 +51,7 @@ fn main() {
         if tr.received == 0 {
             println!(
                 "{}: sent:{}, recv:{}, loss rate: {:.2}%, latency: {}ms",
-                target,
+                addr,
                 total,
                 tr.received,
                 loss_rate * 100.0,
@@ -58,7 +60,7 @@ fn main() {
         } else {
             println!(
                 "{}: sent:{}, recv:{},  loss rate: {:.2}%, latency: {:.2}ms",
-                target,
+                addr,
                 total,
                 tr.received,
                 loss_rate * 100.0,
@@ -67,4 +69,18 @@ fn main() {
             )
         }
     }
+}
+
+fn parse_ip(s: &str) -> String {
+    if let Ok(_) = s.parse::<IpAddr>() {
+        return s.to_string();
+    } else if let Ok(addrs) = (s, 0).to_socket_addrs() {
+        for addr in addrs {
+            if let IpAddr::V4(ipv4) = addr.ip() {
+                return IpAddr::V4(ipv4).to_string();
+            }
+        }
+    }
+    
+    s.to_string()
 }

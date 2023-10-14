@@ -1,18 +1,18 @@
 use std::io::Write;
 use std::process;
 use std::time::Duration;
+use std::net::{IpAddr, ToSocketAddrs};
 
 use anyhow::Result;
 use chrono::Local;
 use structopt::StructOpt;
 
 use ipnetwork::IpNetwork;
-use std::net::{IpAddr, ToSocketAddrs};
 
 #[derive(Debug, StructOpt)]
 #[structopt(
     name = "mping",
-    version = "0.2.1",
+    version = "0.3.0",
     about = "A multi-targets ping tool, which supports 10,000 packets/second."
 )]
 struct Opt {
