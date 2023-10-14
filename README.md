@@ -23,7 +23,7 @@ options usage.
 
 ```sh
 > $$ mping  -h
-mping 0.2.0
+mping 0.3.0
 A multi-targets ping tool, which supports 10,000 packets/second.
 
 USAGE:
