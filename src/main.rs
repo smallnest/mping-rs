@@ -5,18 +5,18 @@ use std::net::{IpAddr, ToSocketAddrs};
 
 use anyhow::Result;
 use chrono::Local;
-use clap::Parser as StructOpt;
+use clap::Parser;
 
 use ipnetwork::IpNetwork;
 
-#[derive(Debug, StructOpt)]
-#[structopt(
+#[derive(Debug, Parser)]
+#[clap(
     name = "mping",
-    version = "0.4.1",
+    version = "0.4.2",
     about = "A multi-targets ping tool, which supports 10,000 packets/second."
 )]
 struct Opt {
-    #[structopt(
+    #[clap(
         short = 'w',
         long = "timeout",
         default_value = "1",
@@ -24,13 +24,13 @@ struct Opt {
     )]
     timeout: u64,
 
-    #[structopt(short = 't', long = "ttl", default_value = "64", help = "time to live")]
+    #[clap(short = 't', long = "ttl", default_value = "64", help = "time to live")]
     ttl: u32,
 
-    #[structopt(short = 'z', long = "tos", help = "type of service")]
+    #[clap(short = 'z', long = "tos", help = "type of service")]
     tos: Option<u32>,
 
-    #[structopt(
+    #[clap(
         short = 's',
         long = "size",
         default_value = "64",
@@ -38,7 +38,7 @@ struct Opt {
     )]
     size: usize,
 
-    #[structopt(
+    #[clap(
         short = 'r',
         long = "rate",
         default_value = "100",
@@ -46,7 +46,7 @@ struct Opt {
     )]
     rate: u64,
 
-    #[structopt(
+    #[clap(
         short = 'd',
         long = "delay",
         default_value = "3",
@@ -54,10 +54,10 @@ struct Opt {
     )]
     delay: u64,
 
-    #[structopt(short = 'c', long = "count", help = "max packet count")]
+    #[clap(short = 'c', long = "count", help = "max packet count")]
     count: Option<i64>,
 
-    #[structopt(
+    #[clap(
         value_delimiter = ',',
         required = true,
         name = "ip address",
