@@ -117,10 +117,9 @@ pub fn ping(
 
     // send
     thread::spawn(move || {
-        let mut support_tx_timestamping = true;
-
         cfg_if! {
             if #[cfg(target_os = "linux")] {
+                let mut support_tx_timestamping = true;
                 let raw_fd = socket.as_raw_fd();
                 let enable = SOF_TIMESTAMPING_SOFTWARE
                     | SOF_TIMESTAMPING_TX_SOFTWARE
@@ -144,7 +143,7 @@ pub fn ping(
                     support_tx_timestamping = false;
                 }
             } else {
-                support_tx_timestamping = false;
+                let support_tx_timestamping = false;
             }
         }
 
@@ -409,13 +408,15 @@ pub fn ping(
 
         let now = SystemTime::now();
         let since_the_epoch = now.duration_since(UNIX_EPOCH).unwrap();
-        let mut timestamp = since_the_epoch.as_nanos();
 
         cfg_if! {
             if #[cfg(target_os = "linux")] {
+                let mut timestamp = since_the_epoch.as_nanos();
                 if let Some(rxts) = get_timestamp(&mut msghdr) {
                     timestamp = rxts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
                 }
+            } else {
+                let timestamp = since_the_epoch.as_nanos();
             }
         }
 
@@ -645,21 +646,19 @@ pub fn ping_once(
                 warn!("Failed to set SO_TIMESTAMPING");
                 support_tx_timestamping = false;
             }
-        } else {
-            let support_tx_timestamping = false;
         }
     }
 
-    // msghdr
-    let mut buf = [0; 2048];
-    let mut control_buf = [0; 1024];
-    let mut iovec = iovec {
-        iov_base: buf.as_mut_ptr() as *mut c_void,
-        iov_len: buf.len(),
-    };
-
     cfg_if! {
         if #[cfg(target_os = "linux")] {
+            // msghdr
+            let mut buf = [0; 2048];
+            let mut control_buf = [0; 1024];
+            let mut iovec = iovec {
+                iov_base: buf.as_mut_ptr() as *mut c_void,
+                iov_len: buf.len(),
+            };
+
             let mut msghdr = msghdr {
                 msg_name: std::ptr::null_mut(),
                 msg_namelen: 0,
@@ -668,16 +667,6 @@ pub fn ping_once(
                 msg_control: control_buf.as_mut_ptr() as *mut c_void,
                 msg_controllen: control_buf.len(),
                 msg_flags: 0,
-            };
-            } else {
-                let mut msghdr = msghdr {
-                    msg_name: std::ptr::null_mut(),
-                    msg_namelen: 0,
-                    msg_iov: &mut iovec,
-                    msg_iovlen: 1,
-                    msg_control: control_buf.as_mut_ptr() as *mut c_void,
-                    msg_controllen: control_buf.len() as u32,
-                    msg_flags: 0,
             };
         }
     }
@@ -698,20 +687,24 @@ pub fn ping_once(
     // send the packet
     let now = SystemTime::now();
     let since_the_epoch = now.duration_since(UNIX_EPOCH)?;
-    let mut txts = since_the_epoch.as_nanos();
     socket.send_to(&buf, &target.into())?;
 
     // read tx timestamp
-    if support_tx_timestamping {
-        cfg_if! {
-            if #[cfg(target_os = "linux")] {
-                unsafe {
-                    let _ = recvmsg(raw_fd, &mut msghdr, MSG_ERRQUEUE | MSG_DONTWAIT);
-                }
-                if let Some(ts) = get_timestamp(&mut msghdr) {
-                    txts = ts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
-                }
+
+    cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            if support_tx_timestamping {
+            let mut txts = since_the_epoch.as_nanos();
+
+            unsafe {
+                let _ = recvmsg(raw_fd, &mut msghdr, MSG_ERRQUEUE | MSG_DONTWAIT);
             }
+            if let Some(ts) = get_timestamp(&mut msghdr) {
+                txts = ts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            }
+        }
+        } else {
+            let txts = since_the_epoch.as_nanos();
         }
     }
 
@@ -802,12 +795,16 @@ pub fn ping_once(
         }
 
         let since_the_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let mut rxts = since_the_epoch.as_nanos();
+
         cfg_if! {
             if #[cfg(target_os = "linux")] {
+                let mut rxts = since_the_epoch.as_nanos();
+
                 if let Some(ts) = get_timestamp(&mut msghdr) {
                     rxts = ts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
                 }
+            } else {
+                let rxts = since_the_epoch.as_nanos();
             }
         }
 
