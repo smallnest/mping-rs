@@ -20,12 +20,12 @@ cfg_if! {
             SOF_TIMESTAMPING_SOFTWARE, SOF_TIMESTAMPING_SYS_HARDWARE, SOF_TIMESTAMPING_TX_HARDWARE,
             SOF_TIMESTAMPING_TX_SOFTWARE,
         };
+        use std::mem;
     } else {
-        use libc::{c_int, c_void, iovec, msghdr, recvmsg, setsockopt, timeval, MSG_DONTWAIT};
+        use libc::{ c_void, iovec, msghdr, recvmsg};
     }
 }
 
-use std::mem;
 use std::os::unix::io::AsRawFd;
 
 use log::{error, info, warn};
@@ -117,12 +117,11 @@ pub fn ping(
 
     // send
     thread::spawn(move || {
-        let raw_fd = socket.as_raw_fd();
-
         let mut support_tx_timestamping = true;
 
         cfg_if! {
             if #[cfg(target_os = "linux")] {
+                let raw_fd = socket.as_raw_fd();
                 let enable = SOF_TIMESTAMPING_SOFTWARE
                     | SOF_TIMESTAMPING_TX_SOFTWARE
                     | SOF_TIMESTAMPING_SYS_HARDWARE
