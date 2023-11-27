@@ -174,7 +174,7 @@ pub fn ping(
                     msg_iov: &mut iovec,
                     msg_iovlen: 1,
                     msg_control: control_buf.as_mut_ptr() as *mut c_void,
-                    msg_controllen: control_buf.len() as u32,
+                    msg_controllen: control_buf.len(),
                     msg_flags: 0,
                 };
             }
@@ -334,15 +334,29 @@ pub fn ping(
         iov_len: buffer.len(),
     };
 
-    let mut msghdr = msghdr {
-        msg_name: std::ptr::null_mut(),
-        msg_namelen: 0,
-        msg_iov: &mut iovec,
-        msg_iovlen: 1,
-        msg_control: control_buf.as_mut_ptr() as *mut c_void,
-        msg_controllen: control_buf.len() as u32,
-        msg_flags: 0,
-    };
+    cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            let mut msghdr = msghdr {
+                msg_name: std::ptr::null_mut(),
+                msg_namelen: 0,
+                msg_iov: &mut iovec,
+                msg_iovlen: 1,
+                msg_control: control_buf.as_mut_ptr() as *mut c_void,
+                msg_controllen: control_buf.len(),
+                msg_flags: 0,
+            };
+        } else {
+            let mut msghdr = msghdr {
+                msg_name: std::ptr::null_mut(),
+                msg_namelen: 0,
+                msg_iov: &mut iovec,
+                msg_iovlen: 1,
+                msg_control: control_buf.as_mut_ptr() as *mut c_void,
+                msg_controllen: control_buf.len() as u32,
+                msg_flags: 0,
+            };
+        }
+    }
 
     loop {
         let nbytes = unsafe { recvmsg(raw_fd, &mut msghdr, 0) };
@@ -645,15 +659,29 @@ pub fn ping_once(
         iov_len: buf.len(),
     };
 
-    let mut msghdr = msghdr {
-        msg_name: std::ptr::null_mut(),
-        msg_namelen: 0,
-        msg_iov: &mut iovec,
-        msg_iovlen: 1,
-        msg_control: control_buf.as_mut_ptr() as *mut c_void,
-        msg_controllen: control_buf.len() as u32,
-        msg_flags: 0,
-    };
+    cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            let mut msghdr = msghdr {
+                msg_name: std::ptr::null_mut(),
+                msg_namelen: 0,
+                msg_iov: &mut iovec,
+                msg_iovlen: 1,
+                msg_control: control_buf.as_mut_ptr() as *mut c_void,
+                msg_controllen: control_buf.len(),
+                msg_flags: 0,
+            };
+            } else {
+                let mut msghdr = msghdr {
+                    msg_name: std::ptr::null_mut(),
+                    msg_namelen: 0,
+                    msg_iov: &mut iovec,
+                    msg_iovlen: 1,
+                    msg_control: control_buf.as_mut_ptr() as *mut c_void,
+                    msg_controllen: control_buf.len() as u32,
+                    msg_flags: 0,
+            };
+        }
+    }
 
     // prepare packet
     let payload = payloads[seq as usize % payloads.len()];
@@ -697,15 +725,29 @@ pub fn ping_once(
         iov_len: buffer.len(),
     };
 
-    let mut msghdr = msghdr {
-        msg_name: std::ptr::null_mut(),
-        msg_namelen: 0,
-        msg_iov: &mut iovec,
-        msg_iovlen: 1,
-        msg_control: control_buf.as_mut_ptr() as *mut c_void,
-        msg_controllen: control_buf.len() as u32,
-        msg_flags: 0,
-    };
+    cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            let mut msghdr = msghdr {
+                msg_name: std::ptr::null_mut(),
+                msg_namelen: 0,
+                msg_iov: &mut iovec,
+                msg_iovlen: 1,
+                msg_control: control_buf.as_mut_ptr() as *mut c_void,
+                msg_controllen: control_buf.len(),
+                msg_flags: 0,
+            };
+        } else {
+            let mut msghdr = msghdr {
+                msg_name: std::ptr::null_mut(),
+                msg_namelen: 0,
+                msg_iov: &mut iovec,
+                msg_iovlen: 1,
+                msg_control: control_buf.as_mut_ptr() as *mut c_void,
+                msg_controllen: control_buf.len() as u32,
+                msg_flags: 0,
+            };
+        }
+    }
 
     let mut n = timeout.as_secs() + 1;
     if n < 2 {
