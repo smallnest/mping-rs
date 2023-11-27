@@ -6,16 +6,25 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use libc::{
-    c_int, c_void, cmsghdr, iovec, msghdr, recvmsg, setsockopt, timespec, timeval, MSG_DONTWAIT,
-    MSG_ERRQUEUE, SOL_SOCKET, SO_TIMESTAMP, SO_TIMESTAMPING,
-};
-use libc::{
-    SCM_TIMESTAMPING, SOF_TIMESTAMPING_OPT_CMSG, SOF_TIMESTAMPING_OPT_TSONLY,
-    SOF_TIMESTAMPING_RAW_HARDWARE, SOF_TIMESTAMPING_RX_HARDWARE, SOF_TIMESTAMPING_RX_SOFTWARE,
-    SOF_TIMESTAMPING_SOFTWARE, SOF_TIMESTAMPING_SYS_HARDWARE, SOF_TIMESTAMPING_TX_HARDWARE,
-    SOF_TIMESTAMPING_TX_SOFTWARE,
-};
+use cfg_if::cfg_if;
+
+cfg_if! {
+    if #[cfg(target_os = "linux")] {
+        use libc::{
+            c_int, c_void, cmsghdr, iovec, msghdr, recvmsg, setsockopt, timespec, timeval, MSG_DONTWAIT,
+            MSG_ERRQUEUE, SOL_SOCKET, SO_TIMESTAMP, SO_TIMESTAMPING,
+        };
+        use libc::{
+            SCM_TIMESTAMPING, SOF_TIMESTAMPING_OPT_CMSG, SOF_TIMESTAMPING_OPT_TSONLY,
+            SOF_TIMESTAMPING_RAW_HARDWARE, SOF_TIMESTAMPING_RX_HARDWARE, SOF_TIMESTAMPING_RX_SOFTWARE,
+            SOF_TIMESTAMPING_SOFTWARE, SOF_TIMESTAMPING_SYS_HARDWARE, SOF_TIMESTAMPING_TX_HARDWARE,
+            SOF_TIMESTAMPING_TX_SOFTWARE,
+        };
+    } else {
+        use libc::{c_int, c_void, iovec, msghdr, recvmsg, setsockopt, timeval, MSG_DONTWAIT};
+    }
+}
+
 use std::mem;
 use std::os::unix::io::AsRawFd;
 
@@ -112,25 +121,32 @@ pub fn ping(
 
         let mut support_tx_timestamping = true;
 
-        let enable = SOF_TIMESTAMPING_SOFTWARE
-            | SOF_TIMESTAMPING_TX_SOFTWARE
-            | SOF_TIMESTAMPING_SYS_HARDWARE
-            | SOF_TIMESTAMPING_TX_HARDWARE
-            | SOF_TIMESTAMPING_RAW_HARDWARE
-            | SOF_TIMESTAMPING_OPT_CMSG
-            | SOF_TIMESTAMPING_OPT_TSONLY;
-        let ret = unsafe {
-            setsockopt(
-                raw_fd,
-                SOL_SOCKET,
-                SO_TIMESTAMPING,
-                &enable as *const _ as *const c_void,
-                mem::size_of_val(&enable) as u32,
-            )
-        };
-        if ret == -1 {
-            warn!("Failed to set SO_TIMESTAMPING");
-            support_tx_timestamping = false;
+        cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                let enable = SOF_TIMESTAMPING_SOFTWARE
+                    | SOF_TIMESTAMPING_TX_SOFTWARE
+                    | SOF_TIMESTAMPING_SYS_HARDWARE
+                    | SOF_TIMESTAMPING_TX_HARDWARE
+                    | SOF_TIMESTAMPING_RAW_HARDWARE
+                    | SOF_TIMESTAMPING_OPT_CMSG
+                    | SOF_TIMESTAMPING_OPT_TSONLY;
+                let ret = unsafe {
+                    setsockopt(
+                        raw_fd,
+                        SOL_SOCKET,
+                        SO_TIMESTAMPING,
+                        &enable as *const _ as *const c_void,
+                        mem::size_of_val(&enable) as u32,
+                    )
+                };
+
+                if ret == -1 {
+                    warn!("Failed to set SO_TIMESTAMPING");
+                    support_tx_timestamping = false;
+                }
+            } else {
+                support_tx_timestamping = false;
+            }
         }
 
         let zero_payload = vec![0; popt.len];
@@ -143,22 +159,26 @@ pub fn ping(
         let mut seq = 1u16;
         let mut sent_count = 0;
 
-        let mut buf = [0; 2048];
-        let mut control_buf = [0; 1024];
-        let mut iovec = iovec {
-            iov_base: buf.as_mut_ptr() as *mut c_void,
-            iov_len: buf.len(),
-        };
+        cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                let mut buf = [0; 2048];
+                let mut control_buf = [0; 1024];
+                let mut iovec = iovec {
+                    iov_base: buf.as_mut_ptr() as *mut c_void,
+                    iov_len: buf.len(),
+                };
 
-        let mut msghdr = msghdr {
-            msg_name: std::ptr::null_mut(),
-            msg_namelen: 0,
-            msg_iov: &mut iovec,
-            msg_iovlen: 1,
-            msg_control: control_buf.as_mut_ptr() as *mut c_void,
-            msg_controllen: control_buf.len(),
-            msg_flags: 0,
-        };
+                let mut msghdr = msghdr {
+                    msg_name: std::ptr::null_mut(),
+                    msg_namelen: 0,
+                    msg_iov: &mut iovec,
+                    msg_iovlen: 1,
+                    msg_control: control_buf.as_mut_ptr() as *mut c_void,
+                    msg_controllen: control_buf.len() as u32,
+                    msg_flags: 0,
+                };
+            }
+        }
 
         loop {
             if !popt.rate_for_all {
@@ -220,14 +240,18 @@ pub fn ping(
                 }
 
                 if support_tx_timestamping {
-                    unsafe {
-                        let _ = recvmsg(raw_fd, &mut msghdr, MSG_ERRQUEUE | MSG_DONTWAIT);
-                    }
-                    if let Some(txts) = get_timestamp(&mut msghdr) {
-                        let ts = txts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
-                        let data = send_buckets.lock().unwrap();
-                        data.update_txts(key, target, seq, ts);
-                        drop(data);
+                    cfg_if! {
+                        if #[cfg(target_os = "linux")] {
+                            unsafe {
+                                let _ = recvmsg(raw_fd, &mut msghdr, MSG_ERRQUEUE | MSG_DONTWAIT);
+                            }
+                            if let Some(txts) = get_timestamp(&mut msghdr) {
+                                let ts = txts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
+                                let data = send_buckets.lock().unwrap();
+                                data.update_txts(key, target, seq, ts);
+                                drop(data);
+                            }
+                        }
                     }
                 }
             }
@@ -263,38 +287,42 @@ pub fn ping(
     socket2.set_read_timeout(Some(popt.timeout))?;
     let raw_fd = socket2.as_raw_fd();
 
-    let enable = SOF_TIMESTAMPING_SOFTWARE
-        | SOF_TIMESTAMPING_TX_SOFTWARE
-        | SOF_TIMESTAMPING_RX_SOFTWARE
-        | SOF_TIMESTAMPING_SYS_HARDWARE
-        | SOF_TIMESTAMPING_TX_HARDWARE
-        | SOF_TIMESTAMPING_RX_HARDWARE
-        | SOF_TIMESTAMPING_RAW_HARDWARE
-        | SOF_TIMESTAMPING_OPT_CMSG
-        | SOF_TIMESTAMPING_OPT_TSONLY;
-    let ret = unsafe {
-        setsockopt(
-            raw_fd,
-            SOL_SOCKET,
-            SO_TIMESTAMPING,
-            &enable as *const _ as *const c_void,
-            mem::size_of_val(&enable) as u32,
-        )
-    };
-    if ret == -1 {
-        warn!("Failed to set read SO_TIMESTAMPING");
-        let enable: c_int = 1;
-        let ret = unsafe {
-            setsockopt(
-                raw_fd,
-                SOL_SOCKET,
-                SO_TIMESTAMP,
-                &enable as *const _ as *const c_void,
-                std::mem::size_of_val(&enable) as u32,
-            )
-        };
-        if ret == -1 {
-            warn!("Failed to set SO_TIMESTAMP");
+    cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            let enable = SOF_TIMESTAMPING_SOFTWARE
+                | SOF_TIMESTAMPING_TX_SOFTWARE
+                | SOF_TIMESTAMPING_RX_SOFTWARE
+                | SOF_TIMESTAMPING_SYS_HARDWARE
+                | SOF_TIMESTAMPING_TX_HARDWARE
+                | SOF_TIMESTAMPING_RX_HARDWARE
+                | SOF_TIMESTAMPING_RAW_HARDWARE
+                | SOF_TIMESTAMPING_OPT_CMSG
+                | SOF_TIMESTAMPING_OPT_TSONLY;
+            let ret = unsafe {
+                setsockopt(
+                    raw_fd,
+                    SOL_SOCKET,
+                    SO_TIMESTAMPING,
+                    &enable as *const _ as *const c_void,
+                    mem::size_of_val(&enable) as u32,
+                )
+            };
+            if ret == -1 {
+                warn!("Failed to set read SO_TIMESTAMPING");
+                let enable: c_int = 1;
+                let ret = unsafe {
+                    setsockopt(
+                        raw_fd,
+                        SOL_SOCKET,
+                        SO_TIMESTAMP,
+                        &enable as *const _ as *const c_void,
+                        std::mem::size_of_val(&enable) as u32,
+                    )
+                };
+                if ret == -1 {
+                    warn!("Failed to set SO_TIMESTAMP");
+                }
+            }
         }
     }
 
@@ -312,7 +340,7 @@ pub fn ping(
         msg_iov: &mut iovec,
         msg_iovlen: 1,
         msg_control: control_buf.as_mut_ptr() as *mut c_void,
-        msg_controllen: control_buf.len(),
+        msg_controllen: control_buf.len() as u32,
         msg_flags: 0,
     };
 
@@ -369,8 +397,13 @@ pub fn ping(
         let now = SystemTime::now();
         let since_the_epoch = now.duration_since(UNIX_EPOCH).unwrap();
         let mut timestamp = since_the_epoch.as_nanos();
-        if let Some(rxts) = get_timestamp(&mut msghdr) {
-            timestamp = rxts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
+
+        cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                if let Some(rxts) = get_timestamp(&mut msghdr) {
+                    timestamp = rxts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
+                }
+            }
         }
 
         let buckets = read_buckets.lock().unwrap();
@@ -504,6 +537,7 @@ fn print_stat(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn get_timestamp(msghdr: &mut msghdr) -> Option<SystemTime> {
     let mut cmsg: *mut cmsghdr = unsafe { libc::CMSG_FIRSTHDR(msghdr) };
 
@@ -575,28 +609,33 @@ pub fn ping_once(
     let raw_fd = socket.as_raw_fd();
 
     // timestamp
-    let mut support_tx_timestamping = true;
-    let enable = SOF_TIMESTAMPING_SOFTWARE
-        | SOF_TIMESTAMPING_TX_SOFTWARE
-        | SOF_TIMESTAMPING_SYS_HARDWARE
-        | SOF_TIMESTAMPING_TX_HARDWARE
-        | SOF_TIMESTAMPING_RAW_HARDWARE
-        | SOF_TIMESTAMPING_OPT_CMSG
-        | SOF_TIMESTAMPING_OPT_TSONLY;
-    let ret = unsafe {
-        setsockopt(
-            raw_fd,
-            SOL_SOCKET,
-            SO_TIMESTAMPING,
-            &enable as *const _ as *const c_void,
-            mem::size_of_val(&enable) as u32,
-        )
-    };
-    if ret == -1 {
-        warn!("Failed to set SO_TIMESTAMPING");
-        support_tx_timestamping = false;
+    cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            let mut support_tx_timestamping = true;
+            let enable = SOF_TIMESTAMPING_SOFTWARE
+                | SOF_TIMESTAMPING_TX_SOFTWARE
+                | SOF_TIMESTAMPING_SYS_HARDWARE
+                | SOF_TIMESTAMPING_TX_HARDWARE
+                | SOF_TIMESTAMPING_RAW_HARDWARE
+                | SOF_TIMESTAMPING_OPT_CMSG
+                | SOF_TIMESTAMPING_OPT_TSONLY;
+            let ret = unsafe {
+                setsockopt(
+                    raw_fd,
+                    SOL_SOCKET,
+                    SO_TIMESTAMPING,
+                    &enable as *const _ as *const c_void,
+                    mem::size_of_val(&enable) as u32,
+                )
+            };
+            if ret == -1 {
+                warn!("Failed to set SO_TIMESTAMPING");
+                support_tx_timestamping = false;
+            }
+        } else {
+            let support_tx_timestamping = false;
+        }
     }
-
 
     // msghdr
     let mut buf = [0; 2048];
@@ -612,10 +651,9 @@ pub fn ping_once(
         msg_iov: &mut iovec,
         msg_iovlen: 1,
         msg_control: control_buf.as_mut_ptr() as *mut c_void,
-        msg_controllen: control_buf.len(),
+        msg_controllen: control_buf.len() as u32,
         msg_flags: 0,
     };
-
 
     // prepare packet
     let payload = payloads[seq as usize % payloads.len()];
@@ -629,7 +667,7 @@ pub fn ping_once(
     let icmp_packet = icmp::IcmpPacket::new(packet.packet()).unwrap();
     let checksum = icmp::checksum(&icmp_packet);
     packet.set_checksum(checksum);
-    
+
     // send the packet
     let now = SystemTime::now();
     let since_the_epoch = now.duration_since(UNIX_EPOCH)?;
@@ -638,11 +676,15 @@ pub fn ping_once(
 
     // read tx timestamp
     if support_tx_timestamping {
-        unsafe {
-            let _ = recvmsg(raw_fd, &mut msghdr, MSG_ERRQUEUE | MSG_DONTWAIT);
-        }
-        if let Some(ts) = get_timestamp(&mut msghdr) {
-            txts = ts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                unsafe {
+                    let _ = recvmsg(raw_fd, &mut msghdr, MSG_ERRQUEUE | MSG_DONTWAIT);
+                }
+                if let Some(ts) = get_timestamp(&mut msghdr) {
+                    txts = ts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
+                }
+            }
         }
     }
 
@@ -661,7 +703,7 @@ pub fn ping_once(
         msg_iov: &mut iovec,
         msg_iovlen: 1,
         msg_control: control_buf.as_mut_ptr() as *mut c_void,
-        msg_controllen: control_buf.len(),
+        msg_controllen: control_buf.len() as u32,
         msg_flags: 0,
     };
 
@@ -704,7 +746,8 @@ pub fn ping_once(
         }
 
         let mut bitflip = false;
-        if payloads[echo_reply.get_sequence_number() as usize % payloads.len()] != echo_reply.payload()
+        if payloads[echo_reply.get_sequence_number() as usize % payloads.len()]
+            != echo_reply.payload()
         {
             warn!(
                 "bitflip detected! seq={:?},",
@@ -719,11 +762,15 @@ pub fn ping_once(
 
         let since_the_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         let mut rxts = since_the_epoch.as_nanos();
-        if let Some(ts) = get_timestamp(&mut msghdr) {
-            rxts = ts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                if let Some(ts) = get_timestamp(&mut msghdr) {
+                    rxts = ts.duration_since(UNIX_EPOCH).unwrap().as_nanos();
+                }
+            }
         }
 
-        return Ok((bitflip, Duration::from_nanos((rxts - txts) as u64)))
+        return Ok((bitflip, Duration::from_nanos((rxts - txts) as u64)));
     }
 
     Err(Error::new(ErrorKind::TimedOut, "timeout").into())

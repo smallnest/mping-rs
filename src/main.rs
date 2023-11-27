@@ -5,33 +5,33 @@ use std::net::{IpAddr, ToSocketAddrs};
 
 use anyhow::Result;
 use chrono::Local;
-use structopt::StructOpt;
+use clap::Parser as StructOpt;
 
 use ipnetwork::IpNetwork;
 
 #[derive(Debug, StructOpt)]
 #[structopt(
     name = "mping",
-    version = "0.3.0",
+    version = "0.4.0",
     about = "A multi-targets ping tool, which supports 10,000 packets/second."
 )]
 struct Opt {
     #[structopt(
-        short = "w",
+        short = 'w',
         long = "timeout",
         default_value = "1",
         help = "timeout in seconds"
     )]
     timeout: u64,
 
-    #[structopt(short = "t", long = "ttl", default_value = "64", help = "time to live")]
+    #[structopt(short = 't', long = "ttl", default_value = "64", help = "time to live")]
     ttl: u32,
 
-    #[structopt(short = "z", long = "tos", help = "type of service")]
+    #[structopt(short = 'z', long = "tos", help = "type of service")]
     tos: Option<u32>,
 
     #[structopt(
-        short = "s",
+        short = 's',
         long = "size",
         default_value = "64",
         help = "payload size"
@@ -39,7 +39,7 @@ struct Opt {
     size: usize,
 
     #[structopt(
-        short = "r",
+        short = 'r',
         long = "rate",
         default_value = "100",
         help = "rate in packets/second"
@@ -47,18 +47,18 @@ struct Opt {
     rate: u64,
 
     #[structopt(
-        short = "d",
+        short = 'd',
         long = "delay",
         default_value = "3",
         help = "delay in seconds"
     )]
     delay: u64,
 
-    #[structopt(short = "c", long = "count", help = "max packet count")]
+    #[structopt(short = 'c', long = "count", help = "max packet count")]
     count: Option<i64>,
 
     #[structopt(
-        parse(from_os_str),
+        value_delimiter = ',',
         required = true,
         name = "ip address",
         help = "one ip address or more, e.g. 127.0.0.1,8.8.8.8/24,bing.com"
@@ -79,7 +79,7 @@ fn main() -> Result<(), anyhow::Error> {
         })
         .init();
 
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
 
     if opt.free.is_empty() {
         println!("Please input ip address");

@@ -15,3 +15,7 @@ Cargo.lock
 
 # RustRover(JetBrains)
 .idea
+
+.history
+
+.DS_Store
