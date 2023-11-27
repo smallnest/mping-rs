@@ -12,7 +12,7 @@ use ipnetwork::IpNetwork;
 #[derive(Debug, StructOpt)]
 #[structopt(
     name = "mping",
-    version = "0.4.0",
+    version = "0.4.1",
     about = "A multi-targets ping tool, which supports 10,000 packets/second."
 )]
 struct Opt {
